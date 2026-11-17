@@ -506,6 +506,15 @@ export class TestSessions implements ISessions {
   }
 
   /**
+   * Apply one Session removal to local client list and snapshot state.
+   * @param sessionId - removed Session identity.
+   */
+  handleSessionRemoved(sessionId: SessionId): void {
+    if (!this.records.has(sessionId)) return
+    void this.remove(sessionId)
+  }
+
+  /**
    * Borrow the already-retained session-scoped Cordis context.
    * @param id - session id.
    * @returns the scoped context, or undefined without a live reference.

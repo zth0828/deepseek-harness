@@ -534,6 +534,8 @@ interface WorkspaceInsertSessionBeforeRequest {
   readonly beforeSessionId?: SessionId
 }
 interface WorkspaceArchiveSessionRequest { readonly sessionId: SessionId }
+interface WorkspaceDeleteSessionRequest { readonly sessionId: SessionId; readonly stopActivity?: boolean }
+interface WorkspaceDeleteSessionValue { readonly deleted: true }
 interface WorkspaceUnarchiveSessionRequest { readonly sessionId: SessionId }
 interface WorkspaceArchiveValue { readonly archivedSessionIds: readonly SessionId[] }
 
@@ -559,6 +561,7 @@ interface FixtureWorkspaceApi {
   insertBefore(request: WorkspaceInsertBeforeRequest): Promise<ConnectionRpcResult<WorkspaceOrderValue>>
   insertSessionBefore(request: WorkspaceInsertSessionBeforeRequest): Promise<ConnectionRpcResult<WorkspaceValue>>
   archiveSession(request: WorkspaceArchiveSessionRequest): Promise<ConnectionRpcResult<WorkspaceArchiveValue>>
+  deleteSession(request: WorkspaceDeleteSessionRequest): Promise<ConnectionRpcResult<WorkspaceDeleteSessionValue>>
   unarchiveSession(request: WorkspaceUnarchiveSessionRequest): Promise<ConnectionRpcResult<WorkspaceArchiveValue>>
 }
 
@@ -4184,6 +4187,27 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
       }
       return sessionOk({ archivedSessionIds: [...archivedSessionIds] })
     },
+    deleteSession: (request) => {
+      if (summaryOf(request.sessionId) === undefined) {
+        return sessionErr({
+          code: 'session/not-found',
+          message: `no session ${request.sessionId}`,
+          details: { sessionId: request.sessionId },
+        })
+      }
+      if (archivedSessionIds.includes(request.sessionId)) {
+        archivedSessionIds.splice(archivedSessionIds.indexOf(request.sessionId), 1)
+        emitWorkspace({ type: 'archived', archivedSessionIds: [...archivedSessionIds] })
+      }
+      for (const ws of workspaces.values()) {
+        const idx = ws.sessionIds.indexOf(request.sessionId)
+        if (idx !== -1) {
+          ws.sessionIds.splice(idx, 1)
+          emitWorkspace({ type: 'upsert', workspace: workspaceSnapshot(ws) })
+        }
+      }
+      return sessionOk({ deleted: true })
+    },
     unarchiveSession: (request) => {
       if (archivedSessionIds.includes(request.sessionId)) {
         archivedSessionIds.splice(archivedSessionIds.indexOf(request.sessionId), 1)
@@ -4385,6 +4409,7 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
           request as WorkspaceInsertSessionBeforeRequest,
         )
         case 'workspace/archiveSession': return workspaceApi.archiveSession(request as WorkspaceArchiveSessionRequest)
+        case 'workspace/deleteSession': return workspaceApi.deleteSession(request as WorkspaceDeleteSessionRequest)
         case 'workspace/unarchiveSession': return workspaceApi.unarchiveSession(
           request as WorkspaceUnarchiveSessionRequest,
         )

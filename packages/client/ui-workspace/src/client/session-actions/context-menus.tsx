@@ -7,11 +7,11 @@ import type { MenuContribution, ContextMenuTargetMap } from '@deepseek-ai/dsh-cl
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type {} from '@deepseek-ai/dsh-client-ui-session-status/client'
 import type {
-  ArchiveSessionInjected, ForkSessionInjected, PinSessionInjected, RenameSessionInjected, SessionIdInjected,
+  ArchiveSessionInjected, DeleteSessionInjected, ForkSessionInjected, PinSessionInjected, RenameSessionInjected, SessionIdInjected,
 } from '../contract/slots.ts'
 
 type Actions = Omit<PinSessionInjected & ArchiveSessionInjected, 'hooks'>
-  & ForkSessionInjected & RenameSessionInjected & SessionIdInjected
+  & ForkSessionInjected & RenameSessionInjected & SessionIdInjected & DeleteSessionInjected
   & { readonly markSession: (sessionId: SessionId, unread: boolean) => void }
 
 /**
@@ -81,6 +81,14 @@ export function registerSessionMenus(ctx: Context, actions: Actions): void {
       icon: { key: restoring ? 'workspace.unarchive' : 'workspace.archive' }, separatorBefore: true, afterContent: true,
       ...restoring ? {} : { commandId: 'session.archive' as ShortcutCommandId },
       run: () => { (restoring ? actions.unarchiveSession : actions.archiveSession)(target.sessionId) },
+    }]
+  })
+  register('delete', 700, ['workspace/deleteSession'], (target) => {
+    if (!allowed(target, 'workspace/deleteSession')) return []
+    return [{
+      id: 'delete', label: t('menu.deleteSession'), icon: { key: 'workspace.delete' },
+      danger: true, afterContent: true,
+      run: () => { actions.requestSessionDelete(target.sessionId, target.displayTitle) },
     }]
   })
 }

@@ -359,6 +359,8 @@ export type RowToast =
   | { kind: 'defaultWorkspaceFailed' }
   | { kind: 'forkRequiresOpen'; sessionId: SessionId }
   | { kind: 'shortcutForkFailed'; reason: 'unavailable' | 'failed' }
+  | { kind: 'deleted' }
+  | { kind: 'deleteFailed' }
   /**
    * An explicit New Session request that failed. `message` is untranslated:
    * a Host refusal as `code: message` — the stable code stays in the copy so
@@ -461,6 +463,32 @@ export interface SessionIdInjected {
   copySessionId: (sessionId: SessionId) => Promise<void>
 }
 
+/** Delete action share: the row only raises the request; the dialog entry answers it. */
+export interface DeleteSessionInjected {
+  /** Ask for the delete dialog. */
+  requestSessionDelete: (sessionId: SessionId, displayTitle: string) => void
+}
+
+/** A Session deletion requested from the menu; the dialog entry opens on it. */
+export interface SessionDeleteTarget {
+  /** Session to delete. */
+  sessionId: SessionId
+  /** Title the dialog displays. */
+  displayTitle: string
+}
+
+/** Delete dialog share: the pending request, its settlement, and the delete action. */
+export interface SessionDeleteDialogInjected {
+  hooks: {
+    /** The delete request, until the dialog confirms or cancels it. */
+    deleteRequest: HostObservable<SessionDeleteTarget | null>
+  }
+  /** Consume or cancel the pending request. */
+  settleSessionDelete: () => void
+  /** Delete a Session. */
+  deleteSession: (sessionId: SessionId, options?: { readonly stopActivity?: boolean }) => Promise<void>
+}
+
 /** A Session rename the rename action asked for; the dialog entry opens on it. */
 export interface SessionRenameTarget {
   /** Session to rename. */
@@ -507,6 +535,13 @@ export type SessionRenameDialogProps =
   & PropsLocale<'workspace'>
   & Omit<SessionRenameDialogInjected, 'hooks'>
   & PropsHooks<SessionRenameDialogInjected['hooks']>
+
+/** Props of the delete dialog entry in `shell.overlay`. */
+export type SessionDeleteDialogProps =
+  PropsRuntime<'shell.overlay'>
+  & PropsLocale<'workspace'>
+  & Omit<SessionDeleteDialogInjected, 'hooks'>
+  & PropsHooks<SessionDeleteDialogInjected['hooks']>
 
 /** Props of the stop-and-archive dialog entry in `shell.overlay`. */
 export type SessionArchiveConfirmProps =

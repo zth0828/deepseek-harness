@@ -155,6 +155,29 @@ export class TestWorkspaces implements IWorkspaces {
   }
 
   /**
+   * Delete a session (recorded). The default mirrors the production face's
+   * observable effect: the id leaves the list state's archive, pin, and workspace sets.
+   * @param sessionId - session to delete.
+   * @param options - options including stopActivity.
+   */
+  async deleteSession(sessionId: SessionId, options?: { readonly stopActivity?: boolean }): Promise<void> {
+    this.calls.push({ method: 'deleteSession', args: [sessionId, options] })
+    const stub = this.stubs.get('deleteSession')
+    if (stub !== undefined) {
+      await (stub(sessionId, options) as Promise<void>)
+      return
+    }
+    await this.update((draft) => {
+      draft.archivedSessionIds = draft.archivedSessionIds.filter(id => id !== sessionId)
+      draft.pinnedSessionIds = draft.pinnedSessionIds.filter(id => id !== sessionId)
+      draft.items = draft.items.map(item => ({
+        ...item,
+        sessionIds: item.sessionIds.filter(id => id !== sessionId),
+      }))
+    })
+  }
+
+  /**
    * Unarchive a session (recorded). The default mirrors the production face's
    * observable effect: the id leaves the list state's archive set.
    * @param sessionId - session to unarchive.

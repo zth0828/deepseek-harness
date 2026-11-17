@@ -16,6 +16,7 @@ import {
   WorkspaceArchiveError,
   WorkspaceController,
   WorkspaceCreateError,
+  WorkspaceDeleteSessionError,
   type WorkspaceFollowSink,
 } from '../src/client/index.ts'
 import type { WorkspaceFollowFrame, WorkspaceId } from '../src/types.ts'
@@ -371,6 +372,7 @@ describe('WorkspaceController', () => {
       sessionIds: ['session'],
     })
     await expect(controller.archiveSession(sid('session'))).resolves.toBeUndefined()
+    await expect(controller.deleteSession(sid('session'))).resolves.toBeUndefined()
     await expect(controller.unarchiveSession(sid('session'))).resolves.toBeUndefined()
     await expect(controller.pinSession(sid('session'))).resolves.toBeUndefined()
     await expect(controller.unpinSession(sid('session'))).resolves.toBeUndefined()
@@ -381,7 +383,9 @@ describe('WorkspaceController', () => {
     expect(mock.log.requests('workspace/insertBefore')).toEqual([{ workspaceId: 'one' }])
     expect(mock.log.requests('workspace/insertSessionBefore')).toEqual([{ workspaceId: 'one', sessionId: 'session' }])
     await expect(controller.archiveSession(sid('session'), { stopActivity: true })).resolves.toBeUndefined()
+    await expect(controller.deleteSession(sid('session'), { stopActivity: true })).resolves.toBeUndefined()
     expect(mock.log.requests('workspace/archiveSession')).toEqual([{ sessionId: 'session' }, { sessionId: 'session', stopActivity: true }])
+    expect(mock.log.requests('workspace/deleteSession')).toEqual([{ sessionId: 'session' }, { sessionId: 'session', stopActivity: true }])
     expect(mock.log.requests('workspace/unarchiveSession')).toEqual([{ sessionId: 'session' }])
     expect(mock.log.requests('workspace/pinSession')).toEqual([{ sessionId: 'session' }])
     expect(mock.log.requests('workspace/unpinSession')).toEqual([{ sessionId: 'session' }])
@@ -420,6 +424,16 @@ describe('WorkspaceController', () => {
     mock.remote.workspace.archiveSession.mockResolvedValueOnce(err(active))
     await expect(controller.archiveSession(sid('session'))).rejects.toMatchObject({
       name: 'WorkspaceArchiveError',
+      rpcError: { code: 'workspace/session-active', details: { activity: [{ kind: 'probe' }, { kind: 'probe-items', items: [{ id: 'item-1' }] }] } },
+    })
+    mock.remote.workspace.deleteSession.mockResolvedValueOnce(err(missingSession))
+    const deleteMissing = controller.deleteSession(sid('session'))
+    await expect(deleteMissing).rejects.toBeInstanceOf(WorkspaceDeleteSessionError)
+    await expect(deleteMissing).rejects.toThrow('workspace session delete failed: session/not-found: missing session')
+
+    mock.remote.workspace.deleteSession.mockResolvedValueOnce(err(active))
+    await expect(controller.deleteSession(sid('session'))).rejects.toMatchObject({
+      name: 'WorkspaceDeleteSessionError',
       rpcError: { code: 'workspace/session-active', details: { activity: [{ kind: 'probe' }, { kind: 'probe-items', items: [{ id: 'item-1' }] }] } },
     })
     mock.remote.workspace.unarchiveSession.mockResolvedValueOnce(err(missingSession))

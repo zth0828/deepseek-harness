@@ -57,7 +57,10 @@ async function harness(options: HarnessOptions = {}) {
     listed.map(header => ({ header, revision: brandString<SessionPersistenceRevision>(`rev-${header.id}`) })))
   const open = vi.fn(() => { throw new Error('event bodies must not be opened') })
   const stat = vi.fn(() => { throw new Error('per-session stat must not be needed') })
-  ctx.provide('sessionPersistence', { list, open, stat } as never)
+  const del = vi.fn(async (id: SessionId): Promise<void> => {
+    listed = listed.filter(s => s.id !== id)
+  })
+  ctx.provide('sessionPersistence', { list, open, stat, delete: del } as never)
 
   if (options.sessionStore === true) {
     await ctx.plugin(SessionStore)
@@ -84,6 +87,7 @@ async function harness(options: HarnessOptions = {}) {
     list,
     open,
     stat,
+    del,
     setSessions: (headers: SessionHeader[]) => { listed = headers },
   }
 }
@@ -1380,6 +1384,60 @@ describe('registry-global session unpin', () => {
     await expect(result.registry.unpinSession(brandString<SessionId>('vanished'))).resolves.toBeUndefined()
     expect(result.registry.pinnedSessionIds).toEqual([])
     expect(result.list.mock.calls.length).toBe(listingsBefore)
+  })
+})
+
+describe('registry session delete', () => {
+  it('deletes session from persistence, detaches from workspace, removes from pins and archives, and emits session-deleted', async () => {
+    const dir = await makeDir('delete-home')
+    const result = await harness({ sessions: [header('s1', dir, 100), header('s2', dir, 200)] })
+    const workspace = result.registry.list()[0]!
+    await result.registry.pinSession(brandString<SessionId>('s1'))
+    await result.registry.archiveSession(brandString<SessionId>('s2'))
+
+    const deletedEvents: SessionId[] = []
+    result.ctx.on('workspace/session-deleted', ({ sessionId }) => { deletedEvents.push(sessionId) })
+
+    expect(workspace.sessionIds).toContain('s1')
+    expect(result.registry.pinnedSessionIds).toEqual(['s1'])
+
+    await result.registry.deleteSession(brandString<SessionId>('s1'))
+
+    expect(result.del).toHaveBeenCalledWith(brandString<SessionId>('s1'))
+    expect(workspace.sessionIds).not.toContain('s1')
+    expect(result.registry.pinnedSessionIds).toEqual([])
+    expect(deletedEvents).toEqual(['s1'])
+
+    // Deleting the archived one removes it from archivedSessionIds
+    expect(result.registry.archivedSessionIds).toEqual(['s2'])
+    await result.registry.deleteSession(brandString<SessionId>('s2'))
+    expect(result.registry.archivedSessionIds).toEqual([])
+    expect(deletedEvents).toEqual(['s1', 's2'])
+  })
+
+  it('rejects an unknown session with WorkspaceUnknownSessionError', async () => {
+    const result = await harness({ sessions: [] })
+    await expect(result.registry.deleteSession(brandString<SessionId>('nonexistent')))
+      .rejects.toThrow(/cannot delete session 'nonexistent'/)
+  })
+
+  it('refuses an active session unless stopActivity is true', async () => {
+    const dir = await makeDir('delete-active')
+    const result = await harness({ sessions: [header('busy', dir, 100)] })
+    result.ctx.on('workspace/session-activity', async ({ sessionId }, next) => {
+      const rest = await next()
+      return sessionId === 'busy' ? [{ kind: 'probe' }, ...rest] : rest
+    })
+    const stopped: SessionId[] = []
+    result.ctx.on('workspace/session-stop', ({ sessionId }) => { stopped.push(sessionId) })
+
+    await expect(result.registry.deleteSession(brandString<SessionId>('busy')))
+      .rejects.toMatchObject({ name: 'WorkspaceActiveSessionError', sessionId: 'busy' })
+    expect(result.del).not.toHaveBeenCalled()
+
+    await result.registry.deleteSession(brandString<SessionId>('busy'), { stopActivity: true })
+    expect(stopped).toEqual(['busy'])
+    expect(result.del).toHaveBeenCalledWith(brandString<SessionId>('busy'))
   })
 })
 

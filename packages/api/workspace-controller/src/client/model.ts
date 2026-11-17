@@ -10,6 +10,8 @@ import type {
   WorkspaceBaseline,
   WorkspaceCreateRequest,
   WorkspaceCreateValue,
+  WorkspaceDeleteSessionRequest,
+  WorkspaceDeleteSessionValue,
   WorkspaceDeleteValue,
   WorkspaceInsertSessionBeforeRequest,
   WorkspaceOrderValue,
@@ -202,6 +204,40 @@ export class ClientWorkspaceModel implements WorkspaceFollowSink {
       // The Host drops an archived session's pin in the same durable write;
       // mirror that locally so no frame shows the row both archived and pinned.
       this.installPinned(this.pinnedSessionIds.filter(id => id !== sessionId))
+    }
+    return result
+  }
+
+  /**
+   * Delete one Session and update local archive and pin sets immediately.
+   * @param sessionId - Session to delete.
+   * @param options - Whether the Host stops the Session's running work instead of refusing.
+   * @returns generated Remote result.
+   */
+  async deleteSession(
+    sessionId: WorkspaceDeleteSessionRequest['sessionId'],
+    options: Pick<WorkspaceDeleteSessionRequest, 'stopActivity'> = {},
+  ): Promise<RemoteResult<WorkspaceDeleteSessionValue>> {
+    const result = await this.remote.deleteSession({
+      sessionId,
+      ...(options.stopActivity === true ? { stopActivity: true } : {}),
+    })
+    if (result.ok) {
+      if (this.archivedSessionIds.includes(sessionId)) {
+        this.installArchived(this.archivedSessionIds.filter(id => id !== sessionId))
+      }
+      if (this.pinnedSessionIds.includes(sessionId)) {
+        this.installPinned(this.pinnedSessionIds.filter(id => id !== sessionId))
+      }
+      const hasSession = this.items.some(item => item.sessionIds.includes(sessionId))
+      if (hasSession) {
+        this.items = this.items.map(item =>
+          item.sessionIds.includes(sessionId)
+            ? { ...item, sessionIds: item.sessionIds.filter(id => id !== sessionId) }
+            : item,
+        )
+        this.invalidate(true)
+      }
     }
     return result
   }

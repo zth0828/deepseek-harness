@@ -11,12 +11,12 @@ import { contextMenuHook } from '@deepseek-ai/dsh-client-test-runtime'
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { SessionListState, SessionSummary } from '@deepseek-ai/dsh-api-session-controller/client'
-import type { WorkspaceId, WorkspaceSnapshot } from '@deepseek-ai/dsh-api-workspace-controller/client'
+import { WorkspaceDeleteSessionError, type WorkspaceId, type WorkspaceSnapshot } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import type { SessionStatusSnapshot } from '@deepseek-ai/dsh-client-ui-session-status/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { GlobalStandardProps, PropsLocale, PropsRenderSlots, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import { allowAllAccess, bindSnapshotSelector, makeTranslate, SlotTestRuntime } from '@deepseek-ai/dsh-client-test-runtime'
+import { allowAllAccess, bindSnapshotSelector, makeTranslate, RemoteError, SlotTestRuntime } from '@deepseek-ai/dsh-client-test-runtime'
 import { LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
 import { registerToasts } from '../src/client/toast/register.ts'
 import { ArchiveToastEntry } from '../src/client/toast/Toast.tsx'
@@ -25,11 +25,13 @@ import { en as commonEn } from '@deepseek-ai/dsh-client-locale/src/locales/en.ts
 import { zh as commonZh } from '@deepseek-ai/dsh-client-locale/src/locales/zh.ts'
 import type {
   RowToast, RowToastState, SessionArchiveConfirmInjected, SessionArchiveConfirmRequest,
+  SessionDeleteDialogInjected, SessionDeleteTarget,
   SessionRenameDialogInjected, SessionRenameTarget,
 } from '../src/client/contract/slots.ts'
 import {
   ArchiveSessionRowButton, SessionArchiveConfirmDialog,
 } from '../src/client/session-actions/ArchiveSession.tsx'
+import { SessionDeleteDialog } from '../src/client/session-actions/DeleteSession.tsx'
 import { PinSessionRowButton } from '../src/client/session-actions/PinSession.tsx'
 import { SessionRenameDialog } from '../src/client/session-actions/RenameSession.tsx'
 import { RowActionToast } from '../src/client/session-actions/RowActionToast.tsx'
@@ -414,6 +416,113 @@ describe('SessionArchiveConfirmDialog', () => {
   })
 })
 
+describe('SessionDeleteDialog', () => {
+  function deleteDialog(deleteSession: SessionDeleteDialogInjected['deleteSession'], translate = t) {
+    const request = createSnapshotStore<SessionDeleteTarget | null>(null)
+    const settleSessionDelete = vi.fn(() => { request.set(null) })
+    render(
+      <SessionDeleteDialog
+        {...overlay}
+        t={translate}
+        useDeleteRequest={bindSnapshotSelector(request)}
+        settleSessionDelete={settleSessionDelete}
+        deleteSession={deleteSession}
+      />,
+    )
+    const ask = (displayTitle = 'Test session'): void => {
+      act(() => { request.set({ sessionId: sid('one'), displayTitle }) })
+    }
+    return { settleSessionDelete, ask }
+  }
+
+  it('renders nothing until a deletion is requested', () => {
+    deleteDialog(vi.fn(async () => {}))
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('renders confirmation dialog with title and message, and settles on cancel', () => {
+    const deleteSession = vi.fn(async () => {})
+    const { settleSessionDelete, ask } = deleteDialog(deleteSession)
+    ask('My chat')
+    expect(screen.getByRole('dialog', { name: '删除此会话？' })).toBeTruthy()
+    expect(screen.getByText('将永久删除“My chat”及其历史记录。此操作无法撤销。')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '取消' }))
+    expect(settleSessionDelete).toHaveBeenCalledOnce()
+    expect(deleteSession).not.toHaveBeenCalled()
+  })
+
+  it('deletes session on confirm and settles on completion', async () => {
+    const pending = Promise.withResolvers<undefined>()
+    const deleteSession = vi.fn(() => pending.promise)
+    const { settleSessionDelete, ask } = deleteDialog(deleteSession)
+    ask('My chat')
+    fireEvent.click(screen.getByRole('button', { name: '删除会话' }))
+    expect(deleteSession).toHaveBeenCalledWith(sid('one'), {})
+    expect(screen.getByRole('status').textContent).toBe('正在删除会话…')
+    await act(async () => { pending.resolve(undefined) })
+    expect(settleSessionDelete).toHaveBeenCalledOnce()
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('handles active session refusal by prompting to stop and delete', async () => {
+    const activeError = new WorkspaceDeleteSessionError(
+      new RemoteError('workspace/session-active', 'session is active', {
+        sessionId: sid('one'),
+        activity: [
+          { kind: 'turn' as const },
+          { kind: 'subagent' as const, items: [{ id: 'child-1', label: 'worker' }] },
+        ],
+      }),
+    )
+    const deleteSession = vi.fn<SessionDeleteDialogInjected['deleteSession']>()
+      .mockRejectedValueOnce(activeError)
+      .mockResolvedValueOnce(undefined)
+
+    const { settleSessionDelete, ask } = deleteDialog(deleteSession)
+    ask('Active chat')
+    fireEvent.click(screen.getByRole('button', { name: '删除会话' }))
+    await waitFor(() => {
+      expect(screen.getByText('“Active chat”仍有正在进行的工作。删除将先停止这些工作，并永久删除此会话。此操作无法撤销。')).toBeTruthy()
+    })
+    const lines = [...screen.getByRole('list', { name: '将被停止的工作' }).querySelectorAll('li')].map(li => li.textContent)
+    expect(lines).toEqual([
+      '进行中的回合',
+      '1 个运行中的子智能体：worker',
+    ])
+    fireEvent.click(screen.getByRole('button', { name: '停止并删除' }))
+    expect(deleteSession).toHaveBeenLastCalledWith(sid('one'), { stopActivity: true })
+    await waitFor(() => {
+      expect(settleSessionDelete).toHaveBeenCalledOnce()
+    })
+  })
+
+  it('keeps the dialog open with a generic rejection surfaced in alert', async () => {
+    const deleteSession = vi.fn<SessionDeleteDialogInjected['deleteSession']>()
+      .mockRejectedValueOnce(new Error('disk permission denied'))
+    const { settleSessionDelete, ask } = deleteDialog(deleteSession)
+    ask('My chat')
+    fireEvent.click(screen.getByRole('button', { name: '删除会话' }))
+    await waitFor(() => {
+      expect(screen.getByRole('alert').textContent).toBe('disk permission denied')
+    })
+    expect(settleSessionDelete).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: '取消' }))
+    expect(settleSessionDelete).toHaveBeenCalledOnce()
+  })
+
+  it('ignores Escape while delete request is pending', async () => {
+    const pending = Promise.withResolvers<undefined>()
+    const deleteSession = vi.fn(() => pending.promise)
+    const { settleSessionDelete, ask } = deleteDialog(deleteSession)
+    ask('My chat')
+    fireEvent.click(screen.getByRole('button', { name: '删除会话' }))
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(settleSessionDelete).not.toHaveBeenCalled()
+    await act(async () => { pending.resolve(undefined) })
+    expect(settleSessionDelete).toHaveBeenCalledOnce()
+  })
+})
+
 // A provider outside this package may merge its own family into the kind map;
 // the dialog must describe it without knowing its copy.
 declare module '@deepseek-ai/dsh-workspace/types' {
@@ -658,6 +767,8 @@ describe('RowActionToast', () => {
     ['unpinFailed', '取消置顶失败，请稍后重试'],
     ['archivedNotOpenable', '已归档对话暂时无法查看，请取消归档后查看'],
     ['defaultWorkspaceFailed', '无法创建默认工作区，请通过“选择工作区”选择文件夹'],
+    ['deleted', '会话已删除'],
+    ['deleteFailed', '删除会话失败，请稍后重试'],
   ] as const)('shows the %s warning and takes it down when its hold ends', async (kind, text) => {
     const { dismissToast, notify } = await toastSurface()
     vi.useFakeTimers()

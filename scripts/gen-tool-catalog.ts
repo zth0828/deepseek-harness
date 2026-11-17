@@ -132,6 +132,7 @@ class CatalogWorkflowEngine extends WorkflowEngine {
 class CatalogSessionPersistence extends SessionPersistence {
   create = unavailableCatalogPersistence
   open = unavailableCatalogPersistence
+  delete = unavailableCatalogPersistence
   flush = unavailableCatalogPersistence
   stat = unavailableCatalogPersistence
   list = unavailableCatalogPersistence

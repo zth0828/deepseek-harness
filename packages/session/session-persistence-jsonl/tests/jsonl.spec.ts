@@ -9,7 +9,7 @@ import { dirname, join, relative, resolve } from 'node:path'
 import { scheduler } from 'node:timers/promises'
 import { SESSION_FORMAT_VERSION, SessionLogOffset, SessionSeq, type SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
-import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
+import { SessionPersistenceNotFoundError, type SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import {
   assertNoRetiredHeaderFields, encodeSegment, eventLines, generationLogFilename, generationLogPath,
@@ -2974,5 +2974,50 @@ describe('JsonlSessionPersistence listing concurrency', () => {
     await expect(listingCtx.sessionPersistence.list()).rejects.toBe(laterSessionFailure)
     listingProbe.failures.set(earlierSession, earlierSessionFailure)
     await expect(listingCtx.sessionPersistence.list()).rejects.toBe(earlierSessionFailure)
+  })
+})
+
+describe('JsonlSessionPersistence: delete', () => {
+  let root: string
+  let ctx: Context
+
+  beforeEach(async () => {
+    root = await freshRoot()
+    ctx = new Context()
+    await ctx.plugin(JsonlSessionPersistence, { root, compression: 'none' })
+  })
+
+  afterEach(async () => { await ctx.fiber.dispose() })
+
+  it('deletes a stored session and removes its directory and listing entry', async () => {
+    const m = meta('to-delete', '/work')
+    await writeLog(ctx.sessionPersistence, m, oneTurnLog())
+    expect(await ctx.sessionPersistence.stat(m.id)).toBeDefined()
+    const targetDir = sessionDir(root, m.cwd, m.id)
+    expect((await stat(targetDir)).isDirectory()).toBe(true)
+
+    await ctx.sessionPersistence.delete(m.id)
+
+    expect(await ctx.sessionPersistence.stat(m.id)).toBeUndefined()
+    let gone = false
+    try { await stat(targetDir) } catch { gone = true }
+    expect(gone).toBe(true)
+    expect((await ctx.sessionPersistence.list()).map(s => s.header.id)).not.toContain(m.id)
+  })
+
+  it('deletes an unmaterialized pending session and closes active handles', async () => {
+    const m = meta('pending-delete', '/work')
+    const handle = await ctx.sessionPersistence.create(m)
+    expect(await ctx.sessionPersistence.stat(m.id)).toBeDefined()
+
+    await ctx.sessionPersistence.delete(m.id)
+
+    expect(await ctx.sessionPersistence.stat(m.id)).toBeUndefined()
+    await expect(handle.read()).rejects.toThrow()
+  })
+
+  it('rejects with SessionPersistenceNotFoundError when session does not exist', async () => {
+    await expect(ctx.sessionPersistence.delete(brandString<SessionId>('nonexistent')))
+      .rejects.toThrow(SessionPersistenceNotFoundError)
   })
 })

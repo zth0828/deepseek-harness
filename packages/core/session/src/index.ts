@@ -1465,6 +1465,24 @@ export class SessionStore extends Service {
   }
 
   /**
+   * Detach an entered session by id from the store and emit `session/disposed`.
+   * If the session is currently dispatching announcement or appending,
+   * the detach is deferred until that unwinds.
+   * If no live session exists with this id, does nothing.
+   * @param id - the session id to detach.
+   */
+  detach(id: SessionId): void {
+    const entry = this.store.get(id)
+    if (entry !== undefined) {
+      if (entry.announcement === 'dispatching' || entry.appending) {
+        entry.detachRequested = true
+        return
+      }
+      entry.detach()
+    }
+  }
+
+  /**
    * Create an independent live session from an exact prefix of a live source.
    * `boundary` is an inclusive source event seq; omitted means the source's
    * current last event. An open tail receives synthetic tool results and

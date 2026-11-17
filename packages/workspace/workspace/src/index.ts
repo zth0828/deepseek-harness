@@ -50,7 +50,7 @@ export class WorkspaceUnknownSessionError extends Error {
    * @param sessionId - The unknown session id.
    * @param verb - The registry operation that named the session.
    */
-  constructor(readonly sessionId: SessionId, verb: 'archive' | 'pin') {
+  constructor(readonly sessionId: SessionId, verb: 'archive' | 'pin' | 'delete') {
     super(`cannot ${verb} session '${sessionId}': live sessions and session persistence hold no such session`)
     this.name = 'WorkspaceUnknownSessionError'
   }
@@ -111,6 +111,15 @@ export interface ArchiveSessionOptions {
   readonly stopActivity?: boolean
 }
 
+/** Caller choices for {@link WorkspaceRegistry.deleteSession}. */
+export interface DeleteSessionOptions {
+  /**
+   * Ask the composed providers to stop the session's running work before
+   * deleting instead of refusing the deletion because of it.
+   */
+  readonly stopActivity?: boolean
+}
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     workspaceRegistry: WorkspaceRegistry
@@ -162,6 +171,12 @@ declare module '@deepseek-ai/cordis' {
      * @mode parallel
      */
     'workspace/session-unarchiving'(request: SessionActivityRequest): Promise<void> | void
+    /**
+     * Notify listeners that a session and its stored artifacts were deleted.
+     * @param request - the deleted Session.
+     * @mode parallel
+     */
+    'workspace/session-deleted'(request: SessionActivityRequest): Promise<void> | void
   }
 }
 
@@ -429,6 +444,62 @@ export class WorkspaceRegistry extends Service {
         ...state,
         archivedSessionIds: state.archivedSessionIds.filter(id => id !== sessionId),
       })
+    })
+  }
+
+  /**
+   * Delete one session and its stored artifacts permanently, stopping its running
+   * work when requested, detaching it from any accounted workspace, and dropping it
+   * from the pin and archive sets.
+   * @param sessionId - The session to delete.
+   * @param options - `stopActivity` asks providers to stop running work first.
+   * @returns resolution after durability.
+   */
+  deleteSession(sessionId: SessionId, options: DeleteSessionOptions = {}): Promise<void> {
+    return this.enqueueOperation(async () => {
+      if (!(await this.sessionKnown(sessionId))) {
+        throw new WorkspaceUnknownSessionError(sessionId, 'delete')
+      }
+      if (options.stopActivity !== true) {
+        const activity = await this.ctx.waterfall(
+          'workspace/session-activity', { sessionId }, () => Promise.resolve([]),
+        )
+        if (activity.length > 0) throw new WorkspaceActiveSessionError(sessionId, activity)
+      }
+      if (options.stopActivity === true) await this.stopSessionActivity(sessionId)
+
+      for (const entity of this.entities.values()) {
+        if (entity.sessionIds.includes(sessionId)) {
+          await entity.detachSession(sessionId)
+        }
+      }
+
+      const state = this.requireState()
+      const archivedSessionIds = state.archivedSessionIds.filter(id => id !== sessionId)
+      const pinnedSessionIds = state.pinnedSessionIds.filter(id => id !== sessionId)
+      if (
+        archivedSessionIds.length !== state.archivedSessionIds.length
+        || pinnedSessionIds.length !== state.pinnedSessionIds.length
+      ) {
+        await this.setState({
+          ...state,
+          archivedSessionIds,
+          pinnedSessionIds,
+        })
+      }
+
+      try {
+        await this.ctx.parallel('workspace/session-deleted', { sessionId })
+      } catch (error) {
+        this.ctx.logger.warn('Session deleted, but delete follow-up failed: %s', error)
+      }
+
+      await this.ctx.sessionPersistence.delete(sessionId)
+
+      this.headers.delete(sessionId)
+      this.sessionPaths.delete(sessionId)
+      this.missingSessionPaths.delete(sessionId)
+      this.invalidSessionPaths.delete(sessionId)
     })
   }
 

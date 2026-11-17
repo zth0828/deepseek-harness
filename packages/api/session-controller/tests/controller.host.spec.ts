@@ -303,4 +303,26 @@ describe('SessionController facade', () => {
     await disposal
     await expect(waiting).resolves.toMatchObject({ done: true })
   })
+
+  it('disposes live agent and session, and emits api-session/removed on workspace/session-deleted', async () => {
+    const ctx = new Context()
+    onTestFinished(() => ctx.fiber.dispose())
+    await mountAgentLoopTestDependencies(ctx)
+    await mountAgentLoopTestHarness(ctx)
+    const gateway: Partial<TypertGatewayService> = { getPendingRemoteEvents: () => [] }
+    ctx.provide('typertGateway', gateway as TypertGatewayService)
+
+    const session = ctx.sessions.create(brandString<SessionId>('deleted-session'), { meta: { cwd: '/workspace' } })
+    await createSessionTestController(ctx, defaults)
+
+    const removed: SessionId[] = []
+    ctx.on('api-session/removed', (id) => { removed.push(id) })
+
+    expect(ctx.sessions.get(session.id)).toBe(session)
+
+    await ctx.parallel('workspace/session-deleted', { sessionId: session.id })
+
+    expect(ctx.sessions.get(session.id)).toBeUndefined()
+    expect(removed).toContain(session.id)
+  })
 })

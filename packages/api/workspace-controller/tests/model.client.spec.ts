@@ -8,6 +8,8 @@ import type {
   WorkspaceCreateRequest,
   WorkspaceCreateValue,
   WorkspaceDeleteRequest,
+  WorkspaceDeleteSessionRequest,
+  WorkspaceDeleteSessionValue,
   WorkspaceDeleteValue,
   WorkspaceFollowFrame,
   WorkspaceInsertBeforeRequest,
@@ -90,6 +92,10 @@ class FakeWorkspaceRemote implements WorkspaceRemote {
     request: WorkspaceArchiveSessionRequest,
   ) => Promise<RemoteResult<WorkspaceArchiveValue>> = request =>
     Promise.resolve(remoteOk({ archivedSessionIds: [request.sessionId] }))
+  onDeleteSession: (
+    request: WorkspaceDeleteSessionRequest,
+  ) => Promise<RemoteResult<WorkspaceDeleteSessionValue>> = () =>
+    Promise.resolve(remoteOk({ deleted: true }))
   onUnarchiveSession: (
     request: WorkspaceUnarchiveSessionRequest,
   ) => Promise<RemoteResult<WorkspaceArchiveValue>> = request =>
@@ -131,6 +137,11 @@ class FakeWorkspaceRemote implements WorkspaceRemote {
   archiveSession(request: WorkspaceArchiveSessionRequest): Promise<RemoteResult<WorkspaceArchiveValue>> {
     this.record('archiveSession', request)
     return this.onArchiveSession(request)
+  }
+
+  deleteSession(request: WorkspaceDeleteSessionRequest): Promise<RemoteResult<WorkspaceDeleteSessionValue>> {
+    this.record('deleteSession', request)
+    return this.onDeleteSession(request)
   }
 
   unarchiveSession(request: WorkspaceUnarchiveSessionRequest): Promise<RemoteResult<WorkspaceArchiveValue>> {
@@ -514,6 +525,18 @@ describe('ClientWorkspaceModel', () => {
     await expect(model.archiveSession(sid('pinned'))).resolves.toMatchObject({ ok: true })
     expect(model.getSnapshot().archivedSessionIds).toEqual(['pinned'])
     expect(model.getSnapshot().pinnedSessionIds).toEqual(['kept'])
+  })
+
+  it('removes deleted session from archive set, pin set, and workspace items', async () => {
+    const remote = new FakeWorkspaceRemote()
+    const model = modelFor(remote)
+    baseline(model, [workspace('ws', [sid('target'), sid('other')])], [sid('target'), sid('archived')], [sid('target'), sid('pinned')])
+
+    await expect(model.deleteSession(sid('target'))).resolves.toMatchObject({ ok: true })
+    const snapshot = model.getSnapshot()
+    expect(snapshot.archivedSessionIds).toEqual(['archived'])
+    expect(snapshot.pinnedSessionIds).toEqual(['pinned'])
+    expect(snapshot.items[0]?.sessionIds).toEqual(['other'])
   })
 
   it('keeps the newest row and places Workspaces missing from partial orders last', async () => {

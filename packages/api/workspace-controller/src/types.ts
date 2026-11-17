@@ -124,6 +124,22 @@ export interface WorkspaceArchiveSessionRequest {
   readonly stopActivity?: boolean
 }
 
+/** Session requested for deletion from Workspace and session persistence. */
+export interface WorkspaceDeleteSessionRequest {
+  readonly sessionId: SessionId
+  /**
+   * Stop the Session's running work — its turn, subagent descendants, owned
+   * background jobs, and active schedules — instead of refusing the delete
+   * as `workspace/session-active`.
+   */
+  readonly stopActivity?: boolean
+}
+
+/** Receipt after one Session is deleted from Workspace and persistence. */
+export interface WorkspaceDeleteSessionValue {
+  readonly deleted: true
+}
+
 /** Session requested for restoration from the archived Session list. */
 export interface WorkspaceUnarchiveSessionRequest {
   readonly sessionId: SessionId

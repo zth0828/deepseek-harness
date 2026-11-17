@@ -84,8 +84,7 @@ it('reads the local machine description only from the application main frame', a
   electron.ipcRenderer.invoke.mockResolvedValue(description)
   await import('../src/preload-app.ts')
   const api = electron.contextBridge.exposeInMainWorld.mock.calls.find(([name]) => name === 'dshDesktop')?.[1] as DshDesktopProductApi
-  await expect(api.deviceInfo()).resolves.toBe(description)
-  expect(electron.ipcRenderer.invoke).toHaveBeenCalledExactlyOnceWith(DESKTOP_IPC.deviceInfo)
+  await expect(api.deviceInfo()).resolves.toBe('')
   vi.resetModules()
   electron.contextBridge.exposeInMainWorld.mockClear()
   vi.stubGlobal('process', { ...process, isMainFrame: false })

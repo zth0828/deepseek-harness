@@ -23,7 +23,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { RemoteHostFacts } from '@deepseek-ai/dsh-api-remotes/client'
 import type { ISessions, SessionForkError } from '@deepseek-ai/dsh-api-session-controller/client'
 import type {
-  IWorkspaces, SessionActivity, WorkspaceArchiveError, WorkspaceId, WorkspaceSnapshot,
+  IWorkspaces, WorkspaceId, WorkspaceSnapshot,
 } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import type { RemoteEndpoint } from '@deepseek-ai/dsh-api-remote-access/client'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
@@ -43,16 +43,33 @@ import type {} from '@deepseek-ai/dsh-client-ui-session/client'
 // Type-only: pulls the useSessionStatus root standard-hook merge.
 import type {} from '@deepseek-ai/dsh-client-ui-session-status/client'
 import {
-  type ArchiveSessionInjected, type DirectoryFlowSlotName, type ForkSessionInjected, menuOpenStateFactory, type PinSessionInjected,
-  type SessionArchiveConfirmInjected, type SessionArchiveConfirmRequest,
-  type RenameSessionInjected, type RowToast, type RowToastInjected, type RowToastState, type SessionRenameDialogInjected,
-  type WorkspaceActionRequest, type SessionIdInjected, type WorkspaceBrowserInjected, type WorkspacePickerInjected,
+  type ArchiveSessionInjected,
+  type DeleteSessionInjected,
+  type DirectoryFlowSlotName,
+  type ForkSessionInjected,
+  menuOpenStateFactory,
+  type PinSessionInjected,
+  type RenameSessionInjected,
+  type RowToast,
+  type RowToastInjected,
+  type RowToastState,
+  type SessionArchiveConfirmInjected,
+  type SessionArchiveConfirmRequest,
+  type SessionDeleteDialogInjected,
+  type SessionDeleteTarget,
+  type SessionIdInjected,
+  type SessionRenameDialogInjected,
+  type WorkspaceActionRequest,
+  type WorkspaceBrowserInjected,
+  type WorkspacePickerInjected,
 } from './contract/slots.ts'
 import { createWorkspaceShortcutControls, installWorkspaceShortcuts } from './shortcuts.ts'
 import { UiWorkspaceService } from './navigation.ts'
 import { createWorkspaceViewStore } from './stores.ts'
 import { WorkspaceBrowser } from './rows/WorkspaceBrowser.tsx'
 import { ArchiveSessionRowButton, SessionArchiveConfirmDialog } from './session-actions/ArchiveSession.tsx'
+import { SessionDeleteDialog } from './session-actions/DeleteSession.tsx'
+import { activeSessionRefusal } from './session-actions/active-refusal.ts'
 import { derive } from './session-actions/derived.ts'
 import { registerSessionMenus } from './session-actions/context-menus.tsx'
 import { PinSessionRowButton } from './session-actions/PinSession.tsx'
@@ -65,7 +82,7 @@ import { en, ja, es, fr, de, ru, pt, zh, type WorkspaceKey } from './locales.ts'
 export type { StartSessionOptions, UiWorkspace } from './navigation.ts'
 export type {
   DirectoryFlowOwnerProps, DirectoryFlowSlotName, DirectoryPickingHooks, DirectoryPickingInjected,
-  MenuOpenState, RowToast, SessionRenameTarget, SessionRowOwnerProps, UseMenuOpenState, WorkspaceBrowserInjected,
+  MenuOpenState, RowToast, SessionDeleteTarget, SessionRenameTarget, SessionRowOwnerProps, UseMenuOpenState, WorkspaceBrowserInjected,
   SessionRowScheduleOwnerProps,
   WorkspaceBrowserProps,
   WorkspacePickerInjected, WorkspacePickerInput, WorkspacePickerProps,
@@ -207,7 +224,11 @@ export function apply(ctx: Context): void {
   // its bound hook.
   const renameRequest = derive(shortcutControls.state, state => state.renameTarget)
   const archiveRequest = createSnapshotStore<SessionArchiveConfirmRequest | null>(null)
+  const deleteRequest = createSnapshotStore<SessionDeleteTarget | null>(null)
   const requestSessionRename = shortcutControls.rename
+  const requestSessionDelete = (sessionId: SessionId, displayTitle: string): void => {
+    deleteRequest.set({ sessionId, displayTitle })
+  }
   const unarchiveSession = (sessionId: SessionId): void => {
     uiWorkspace.unarchiveSession(sessionId).catch((reason: unknown) => {
       console.warn('session unarchive rejected:', reason)
@@ -299,6 +320,24 @@ export function apply(ctx: Context): void {
     hooks: { renameRequest },
     settleSessionRename: shortcutControls.closeRename,
     renameSession,
+  })
+  const deleteInjected = (): DeleteSessionInjected => ({ requestSessionDelete })
+  const deleteDialogInjected = (): SessionDeleteDialogInjected => ({
+    hooks: { deleteRequest },
+    settleSessionDelete: () => { deleteRequest.set(null) },
+    deleteSession: async (sessionId, options) => {
+      try {
+        await uiWorkspace.deleteSession(sessionId, options)
+        notify({ kind: 'deleted' })
+      } catch (error) {
+        const activity = activeSessionRefusal(error)
+        if (activity !== undefined) {
+          throw error
+        }
+        notify({ kind: 'deleteFailed' })
+        throw error
+      }
+    },
   })
   const toastActions = {
     undoArchive: unarchiveSession,
@@ -395,7 +434,7 @@ export function apply(ctx: Context): void {
     } },
   }, SessionMenu))
   registerSessionMenus(ctx, {
-    ...pinInjected(), ...archiveInjected(), ...renameInjected(), ...forkInjected(), ...sessionIdInjected(),
+    ...pinInjected(), ...archiveInjected(), ...deleteInjected(), ...renameInjected(), ...forkInjected(), ...sessionIdInjected(),
     markSession,
   })
   ctx.slots.inject('sidebar.workspaces.session.row.action', function* () {
@@ -411,6 +450,9 @@ export function apply(ctx: Context): void {
     yield ctx.slots.register({
       name: 'shell.overlay', id: 'workspace.session-archive', locale: NS, inject: archiveConfirmInjected,
     }, SessionArchiveConfirmDialog)
+    yield ctx.slots.register({
+      name: 'shell.overlay', id: 'workspace.session-delete', locale: NS, inject: deleteDialogInjected,
+    }, SessionDeleteDialog)
     yield ctx.slots.register({
       name: 'shell.overlay', id: 'workspace.row-toast', inject: rowToastInjected,
       children: { 'workspace.toast': { kind: 'keyed', scope: 'root' } },
@@ -434,15 +476,4 @@ export function apply(ctx: Context): void {
     inject: pickerInjected(factoryFlowSource),
     locale: NS,
   }, WorkspacePickerFactory)
-}
-
-/**
- * The activity a Host `workspace/session-active` refusal reported, or nothing
- * for any other failure. The class identity check goes by name: client plugin
- * bundles do not share error-class identity.
- */
-function activeSessionRefusal(reason: unknown): readonly SessionActivity[] | undefined {
-  if (!(reason instanceof Error) || reason.name !== 'WorkspaceArchiveError') return undefined
-  const { rpcError } = reason as WorkspaceArchiveError
-  return rpcError.code === 'workspace/session-active' ? rpcError.details.activity : undefined
 }

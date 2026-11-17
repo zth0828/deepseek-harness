@@ -1334,6 +1334,24 @@ describe('SessionStore', () => {
     expect(ctx.sessions.get(brandString<SessionId>('lifecycle'))).toBeUndefined()
   })
 
+  it('detach(id) removes the session by id and emits session/disposed', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const disposed: Session[] = []
+    ctx.on('session/disposed', session => void disposed.push(session))
+
+    const session = ctx.sessions.create(brandString<SessionId>('detached-by-id'))
+    expect(ctx.sessions.get(session.id)).toBe(session)
+
+    ctx.sessions.detach(session.id)
+    expect(ctx.sessions.get(session.id)).toBeUndefined()
+    expect(disposed).toEqual([session])
+
+    // Idempotent: detaching nonexistent or already detached id does nothing
+    ctx.sessions.detach(session.id)
+    expect(disposed).toHaveLength(1)
+  })
+
   it('prevents simultaneous attachment of one session object to two stores', async () => {
     const firstCtx = new Context()
     const secondCtx = new Context()

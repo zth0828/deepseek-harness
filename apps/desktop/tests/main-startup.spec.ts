@@ -301,15 +301,6 @@ const harness = await vi.hoisted(async () => {
   }
 })
 
-const testAuth = vi.hoisted(() => ({ login: vi.fn<() => Promise<'returned' | 'cancelled' | 'failed'>>(),
-  focus: vi.fn(), dispose: vi.fn(async () => {}) }))
-vi.mock('../src/policy-test-auth.ts', () => ({ DesktopPolicyTestAuth: class {
-  readonly login = testAuth.login
-  readonly focus = testAuth.focus
-  readonly dispose = testAuth.dispose
-  readonly request: typeof fetch = (input, init) => fetch(input, init)
-} }))
-
 vi.mock('electron', () => ({
   app: harness.app,
   BrowserWindow: harness.FakeWindow,
@@ -405,17 +396,6 @@ vi.mock('../src/update-coordinator.ts', () => ({ DesktopUpdateCoordinator: class
   readonly install = harness.updateInstall
   readonly dispose = vi.fn()
 } }))
-vi.mock('../src/platform-view.ts', async importOriginal => ({
-  ...await importOriginal<typeof import('../src/platform-view.ts')>(),
-  DesktopPlatformView: class {
-    notifyLocaleChanged() {}
-    setSession() {}
-    setBounds() {}
-    close() {}
-    closeAndWait(): Promise<void> { return harness.platformCloseAndWait() }
-    dispose(): Promise<void> { return harness.platformDispose() }
-  },
-}))
 vi.mock('../src/welcome-backend.ts', () => ({
   connectDesktopWelcome: (...args: unknown[]) => {
     harness.connectWelcome(...args)
@@ -459,8 +439,6 @@ beforeEach(() => {
   vi.clearAllMocks()
   harness.dialog.showMessageBox.mockReset()
   harness.dialog.showMessageBox.mockResolvedValue({ response: 1 })
-  testAuth.login.mockReset()
-  testAuth.login.mockResolvedValue('cancelled')
   vi.useFakeTimers()
   harness.reset()
   const userData = mkdtempSync(join(tmpdir(), 'dsh-main-user-data-'))
@@ -752,7 +730,6 @@ describe('desktop main startup', () => {
     writeFileSync(path, raw)
     await readyForUpdate()
     expect(harness.hosts).toHaveLength(1)
-    expect(testAuth.login).not.toHaveBeenCalled()
     expect(console.warn).toHaveBeenCalledWith(expect.stringContaining(path), expect.any(Error))
     expect(harness.dialog.showMessageBox).not.toHaveBeenCalledWith(expect.objectContaining({ title: en.startupFailed }))
     expect(readFileSync(path, 'utf8')).toBe(raw)
@@ -892,218 +869,6 @@ describe('desktop main startup', () => {
     expect(console.error).toHaveBeenLastCalledWith(expect.objectContaining({ message: 'overlay unavailable' }))
   })
 
-  it.each(['missing-file', 'missing-field', 'disabled'] as const)('suppresses every test auth dialog for %s while continuing update checks', async (configuration) => {
-    if (configuration === 'disabled') configureTestAuthPopup(false)
-    if (configuration === 'missing-field') {
-      configureTestAuthPopup(true)
-      writeFileSync(join(harness.app.getPath('userData'), 'desktop', 'settings.json'), '{}')
-    }
-    harness.embeddedPolicy = { origin: 'https://policy.example.com', authentication: 'feishu-test', allowedAuthOrigins: ['https://login.example.com'],
-      allowedPageOrigins: ['https://downloads.example.com'], intervalMs: 1000, jitter: 0 }
-    const request = vi.fn<typeof fetch>().mockImplementation(async () =>
-      Response.json({ error: { code: 'UNAUTHENTICATED' } }, { status: 401 }))
-    vi.stubGlobal('fetch', request)
-    await readyForUpdate()
-    await vi.advanceTimersByTimeAsync(0)
-    expect(harness.dialog.showMessageBox).not.toHaveBeenCalled()
-    expect(request).toHaveBeenCalledWith(expect.any(URL), expect.objectContaining({ credentials: 'include', redirect: 'error' }))
-    // Editing the file cannot change the consent policy of an already running process.
-    configureTestAuthPopup(true)
-    harness.dialog.showMessageBox.mockResolvedValue({ response: 0 })
-    await invoke(DESKTOP_IPC.updatesOpen, 'app')
-    harness.powerMonitor.emit('resume')
-    await vi.advanceTimersByTimeAsync(10_000)
-    expect(request.mock.calls.length).toBeGreaterThan(2)
-    expect(testAuth.login).not.toHaveBeenCalled()
-    expect(testAuth.focus).not.toHaveBeenCalled()
-    const messages = harness.dialog.showMessageBox.mock.calls.map(call => (call.at(-1) as { message: string }).message)
-    const expected = JSON.parse(readFileSync(new URL('./expected/policy-login-en.json', import.meta.url), 'utf8')) as Record<string, string[]>
-    expect(messages).toEqual(expected.disabled)
-    expect(harness.updateDownload).not.toHaveBeenCalled()
-  })
-
-  it('checks updates from the application menu without offering disabled test authentication', async () => {
-    configureTestAuthPopup(false)
-    harness.embeddedPolicy = { origin: 'https://policy.example.com', authentication: 'feishu-test',
-      allowedAuthOrigins: ['https://login.example.com'], allowedPageOrigins: ['https://downloads.example.com'] }
-    const request = vi.fn<typeof fetch>().mockImplementation(async () =>
-      Response.json({ error: { code: 'UNAUTHENTICATED' } }, { status: 401 }))
-    vi.stubGlobal('fetch', request)
-    await readyForUpdate()
-    await vi.advanceTimersByTimeAsync(0)
-    request.mockClear()
-    harness.updateCheck.mockClear()
-    const checkUpdates = applicationMenuItems().find(item => item.label === en.checkUpdatesMenu)!.click as () => void
-    checkUpdates()
-    await vi.advanceTimersByTimeAsync(10_000)
-    expect(request).toHaveBeenCalled()
-    expect(harness.updateCheck).toHaveBeenCalledWith(true)
-    expect(testAuth.login).not.toHaveBeenCalled()
-    expect(harness.dialog.showMessageBox.mock.calls.map(call => (call.at(-1) as { message: string }).message))
-      .not.toContain(en.policyLoginRequired)
-  })
-
-  it.each([false, true])('retains anonymous production checks with popup permission %s', async (allow) => {
-    configureTestAuthPopup(allow)
-    harness.embeddedPolicy = { origin: 'https://policy.example.com', authentication: 'anonymous',
-      allowedPageOrigins: ['https://downloads.example.com'] }
-    const request = vi.fn<typeof fetch>().mockImplementation(async () =>
-      Response.json({ error: { code: 'UNAUTHENTICATED' } }, { status: 401 }))
-    vi.stubGlobal('fetch', request)
-    await readyForUpdate()
-    await invoke(DESKTOP_IPC.updatesOpen, 'app')
-    expect(request).toHaveBeenCalledWith(expect.any(URL), expect.objectContaining({ credentials: 'omit' }))
-    expect(testAuth.login).not.toHaveBeenCalled()
-    expect(harness.dialog.showMessageBox.mock.calls.map(call => (call.at(-1) as { message: string }).message))
-      .not.toContain(en.policyLoginRequired)
-  })
-
-  it('keeps a received mandatory decision when test cookies expire with popups disabled', async () => {
-    configureTestAuthPopup(false)
-    harness.embeddedPolicy = { origin: 'https://policy.example.com', authentication: 'feishu-test', allowedAuthOrigins: ['https://login.example.com'],
-      allowedPageOrigins: ['https://downloads.example.com'], intervalMs: 1000, jitter: 0 }
-    const request = vi.fn<typeof fetch>().mockImplementation(async () =>
-      Response.json({ error: { code: 'UNAUTHENTICATED' } }, { status: 401 }))
-      .mockResolvedValueOnce(Response.json({ code: 40005, data: { show_content: { title: 'Update', detail: 'Required' },
-        desktop_app_link: 'https://downloads.example.com/' } }))
-    vi.stubGlobal('fetch', request)
-    const host = await readyForUpdate()
-    await harness.policyBlocked.promise
-    await vi.advanceTimersByTimeAsync(1000)
-    const modal = harness.windows[0]!
-    const owned = { sender: modal.webContents, senderFrame: modal.webContents.mainFrame }
-    await harness.handlers.get(MANDATORY_IPC.action)!(owned, 'refresh')
-    expect(harness.handlers.get(MANDATORY_IPC.status)!(owned)).toMatchObject({
-      policy: { blocking: true, error: 'authentication-required' },
-    })
-    expect(testAuth.login).not.toHaveBeenCalled()
-    expect(harness.dialog.showMessageBox).not.toHaveBeenCalled()
-    expect(modal.isDestroyed()).toBe(false)
-    expect(host.stop).not.toHaveBeenCalled()
-  })
-
-  it('shows one explained startup login before Host readiness and joins concurrent checks without reopening it', async () => {
-    configureTestAuthPopup(true)
-    harness.embeddedPolicy = { origin: 'https://policy.example.com', authentication: 'feishu-test', allowedAuthOrigins: ['https://login.example.com'],
-      allowedPageOrigins: ['https://downloads.example.com'], intervalMs: 1000, jitter: 0 }
-    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockImplementation(async () =>
-      Response.json({ error: { code: 'UNAUTHENTICATED' } }, { status: 401 })))
-    const explanation = Promise.withResolvers<{ response: number }>()
-    const explained = Promise.withResolvers<undefined>()
-    const login = Promise.withResolvers<'cancelled'>()
-    const entered = Promise.withResolvers<undefined>()
-    harness.dialog.showMessageBox.mockImplementationOnce(() => { explained.resolve(undefined); return explanation.promise })
-    testAuth.login.mockImplementationOnce(() => { entered.resolve(undefined); return login.promise })
-    const checks: Promise<unknown>[] = []
-    try {
-      await import('../src/main.ts')
-      await explained.promise
-      expect(harness.hosts).toHaveLength(0)
-      expect(harness.dialog.showMessageBox).toHaveBeenCalledOnce()
-      expect(harness.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({
-        message: en.policyLoginRequired, buttons: [en.policyLogin, en.later], cancelId: 1,
-      }))
-      checks.push(Promise.resolve(invoke(DESKTOP_IPC.updatesOpen, 'app')))
-      expect(harness.dialog.showMessageBox).toHaveBeenCalledOnce()
-      expect(testAuth.login).not.toHaveBeenCalled()
-      explanation.resolve({ response: 0 })
-      await entered.promise
-      checks.push(Promise.resolve(invoke(DESKTOP_IPC.updatesOpen, 'app')))
-      expect(testAuth.focus).toHaveBeenCalled()
-      expect(testAuth.login).toHaveBeenCalledOnce()
-      expect(harness.dialog.showMessageBox).toHaveBeenCalledOnce()
-      login.resolve('cancelled')
-      await Promise.all(checks)
-      await vi.advanceTimersByTimeAsync(10_000)
-      expect(testAuth.login).toHaveBeenCalledOnce()
-      const messages = harness.dialog.showMessageBox.mock.calls.map(call => (call.at(-1) as { message: string }).message)
-      expect(messages.filter(message => message === en.policyLoginRequired)).toHaveLength(1)
-      expect(messages).toContain('You’re up to date!')
-    } finally {
-      explanation.resolve({ response: 1 })
-      login.resolve('cancelled')
-      await Promise.allSettled(checks)
-    }
-  })
-
-  it.each(['returned', 'cancelled', 'failed'] as const)('requires explicit test login and handles %s without downloading', async (outcome) => {
-    configureTestAuthPopup(true)
-    harness.embeddedPolicy = { origin: 'https://policy.example.com', authentication: 'feishu-test', allowedAuthOrigins: ['https://login.example.com'],
-      allowedPageOrigins: ['https://downloads.example.com'], intervalMs: 10_000, jitter: 0 }
-    const request = vi.fn<typeof fetch>().mockImplementation(async () => Response.json({ error: { code: 'UNAUTHENTICATED' } }, { status: 401 }))
-    vi.stubGlobal('fetch', request)
-    await readyForUpdate()
-    await vi.advanceTimersByTimeAsync(0)
-    expect(testAuth.login).not.toHaveBeenCalled()
-    expect(harness.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({ message: en.policyLoginRequired }))
-    harness.dialog.showMessageBox.mockClear()
-    testAuth.login.mockImplementationOnce(async () => {
-      request.mockImplementation(async () => Response.json({ code: 0, data: { biz_code: 0, biz_data: null } }))
-      return outcome
-    })
-    harness.dialog.showMessageBox.mockResolvedValue({ response: 0 })
-    await invoke(DESKTOP_IPC.updatesOpen, 'app')
-    expect(testAuth.login).toHaveBeenCalledOnce()
-    expect(harness.dialog.showMessageBox.mock.calls.map(call => call.at(-1) as unknown)).toContainEqual(expect.objectContaining({
-      message: en.policyLoginRequired, buttons: [en.policyLogin, en.later],
-    }))
-    expect(harness.updateDownload).not.toHaveBeenCalled()
-    expect(harness.updateInstall).not.toHaveBeenCalled()
-    const messages = harness.dialog.showMessageBox.mock.calls.map(call => (call.at(-1) as { message: string }).message)
-    const expected = JSON.parse(readFileSync(new URL('./expected/policy-login-en.json', import.meta.url), 'utf8')) as Record<string, string[]>
-    expect(messages).toEqual(expected[outcome])
-  })
-
-  it('does not open Feishu when the user declines test login', async () => {
-    configureTestAuthPopup(true)
-    harness.embeddedPolicy = { origin: 'https://policy.example.com', authentication: 'feishu-test', allowedAuthOrigins: ['https://login.example.com'],
-      allowedPageOrigins: ['https://downloads.example.com'] }
-    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockImplementation(async () => Response.json({ error: { code: 'UNAUTHENTICATED' } }, { status: 401 })))
-    await readyForUpdate()
-    harness.dialog.showMessageBox.mockResolvedValue({ response: 1 })
-    await invoke(DESKTOP_IPC.updatesOpen, 'app')
-    expect(testAuth.login).not.toHaveBeenCalled()
-  })
-
-  it('does not require gateway login to download an already available ordinary update', async () => {
-    harness.embeddedPolicy = { origin: 'https://policy.example.com', authentication: 'feishu-test', allowedAuthOrigins: ['https://login.example.com'],
-      allowedPageOrigins: ['https://downloads.example.com'] }
-    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockImplementation(async () =>
-      Response.json({ error: { code: 'UNAUTHENTICATED' } }, { status: 401 })))
-    await readyForUpdate()
-    await vi.advanceTimersByTimeAsync(0)
-    harness.updateState = { phase: 'available', version: '1.0.1-nightly.1' }
-    await invoke(DESKTOP_IPC.updatesOpen, 'app')
-    expect(harness.updateDownload).toHaveBeenCalledWith('1.0.1-nightly.1', 0)
-    expect(testAuth.login).not.toHaveBeenCalled()
-  })
-
-  it('retains the embedded block and running Host after expired test login is cancelled', async () => {
-    configureTestAuthPopup(true)
-    harness.embeddedPolicy = { origin: 'https://policy.example.com', authentication: 'feishu-test', allowedAuthOrigins: ['https://login.example.com'],
-      allowedPageOrigins: ['https://downloads.example.com'], intervalMs: 1000, jitter: 0 }
-    const request = vi.fn<typeof fetch>().mockImplementation(async () =>
-      Response.json({ error: { code: 'UNAUTHENTICATED' } }, { status: 401 }))
-      .mockResolvedValueOnce(Response.json({ code: 40005, data: { show_content: { title: 'Update', detail: 'Required' },
-        desktop_app_link: 'https://downloads.example.com/' } }))
-    vi.stubGlobal('fetch', request)
-    const host = await readyForUpdate()
-    await harness.policyBlocked.promise
-    await vi.advanceTimersByTimeAsync(1000)
-    const modal = harness.windows[0]!
-    const owned = { sender: modal.webContents, senderFrame: modal.webContents.mainFrame }
-    harness.dialog.showMessageBox.mockResolvedValue({ response: 0 })
-    testAuth.login.mockResolvedValueOnce('cancelled')
-    await harness.handlers.get(MANDATORY_IPC.action)!(owned, 'refresh')
-    expect(testAuth.login).toHaveBeenCalledOnce()
-    expect(harness.handlers.get(MANDATORY_IPC.status)!(owned)).toMatchObject({
-      policy: { blocking: true, error: 'authentication-required' },
-    })
-    expect(modal.isDestroyed()).toBe(false)
-    expect(host.stop).not.toHaveBeenCalled()
-    expect(harness.updateDownload).not.toHaveBeenCalled()
-  })
-
   it('persists opt-in update evidence from the real main entry without private diagnostics', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'dsh-main-update-journal-'))
     try {
@@ -1133,7 +898,7 @@ describe('desktop main startup', () => {
   it('accepts product IPC only from the current application top frame in the owned main window', async () => {
     await readyForUpdate()
     const sender = harness.windows[0]!.webContents
-    for (const channel of [DESKTOP_IPC.updatesStatus, DESKTOP_IPC.updatesChannelGet, DESKTOP_IPC.deviceInfo]) {
+    for (const channel of [DESKTOP_IPC.updatesStatus, DESKTOP_IPC.updatesChannelGet]) {
       const handler = harness.handlers.get(channel)!
       expect(() => handler({ sender, senderFrame: sender.mainFrame })).not.toThrow()
       for (const event of [
@@ -1913,33 +1678,6 @@ describe('desktop main startup', () => {
     expect(harness.updateInstall).toHaveBeenCalledWith('1.0.1', 0)
   })
 
-  it('waits for Platform view storage cleanup before an ordinary quit completes', async () => {
-    const host = await readyForUpdate()
-    const disposal = harness.deferPlatformDispose()
-    harness.app.quit()
-    await host.stopping.promise
-    expect(harness.platformDispose).toHaveBeenCalledOnce()
-    host.exited.resolve()
-    expect(harness.app.quit).toHaveBeenCalledOnce()
-    disposal.resolve()
-    await harness.quitCompleted.promise
-    expect(harness.app.quit).toHaveBeenCalledTimes(2)
-  })
-
-  it('reports a Platform cleanup failure without ending the Host shutdown early', async () => {
-    const host = await readyForUpdate()
-    const disposal = harness.deferPlatformDispose()
-    const failure = new Error('platform storage cleanup failed')
-    harness.app.quit()
-    await host.stopping.promise
-    disposal.reject(failure)
-    await vi.waitFor(() => { expect(console.error).toHaveBeenCalledWith(failure) })
-    expect(harness.app.quit).toHaveBeenCalledOnce()
-    host.exited.resolve()
-    await harness.quitCompleted.promise
-    expect(harness.app.quit).toHaveBeenCalledTimes(2)
-  })
-
   it('reports file cleanup failure without ending Host shutdown early', async () => {
     const host = await readyForUpdate()
     const failure = new Error('image cleanup failed')
@@ -2212,40 +1950,6 @@ describe('desktop main startup', () => {
     }
   })
 
-  it.each([false, true])('handles a deferred authentication failure with popup permission %s', async (allow) => {
-    configureTestAuthPopup(allow)
-    harness.embeddedPolicy = { origin: 'https://policy.example.com', authentication: 'feishu-test', allowedAuthOrigins: ['https://login.example.com'],
-      allowedPageOrigins: ['https://downloads.example.com'], intervalMs: 10_000, jitter: 0 }
-    const request = vi.fn<typeof fetch>()
-      .mockResolvedValueOnce(Response.json({ code: 0, data: { biz_code: 0, biz_data: null } }))
-      .mockResolvedValue(Response.json({ error: { code: 'UNAUTHENTICATED' } }, { status: 401 }))
-    vi.stubGlobal('fetch', request)
-    await readyForUpdate()
-    await vi.advanceTimersByTimeAsync(0)
-    const ordinaryResult = Promise.withResolvers<{ response: number }>()
-    const ordinaryShown = Promise.withResolvers<undefined>()
-    const policyShown = Promise.withResolvers<undefined>()
-    harness.dialog.showMessageBox.mockImplementation(({ message }: { message: string }) => {
-      if (message === en.updateCurrent) {
-        ordinaryShown.resolve(undefined)
-        return ordinaryResult.promise
-      }
-      if (message === en.policyLoginRequired) policyShown.resolve(undefined)
-      return Promise.resolve({ response: 1 })
-    })
-    const operation = Promise.resolve(invoke(DESKTOP_IPC.updatesOpen, 'app'))
-    await ordinaryShown.promise
-    expect(harness.dialog.showMessageBox.mock.calls.map(call => (call.at(-1) as { message: string }).message))
-      .not.toContain(en.policyLoginRequired)
-    ordinaryResult.resolve({ response: 0 })
-    await operation
-    await vi.advanceTimersByTimeAsync(0)
-    if (allow) await policyShown.promise
-    else expect(harness.dialog.showMessageBox.mock.calls.map(call => (call.at(-1) as { message: string }).message))
-      .not.toContain(en.policyLoginRequired)
-    expect(testAuth.login).not.toHaveBeenCalled()
-  })
-
   it('downloads on the first click and opens installation confirmation only after readiness', async () => {
     await readyForUpdate()
     harness.updateState = { phase: 'available', version: '1.0.1-nightly.1' }
@@ -2457,21 +2161,6 @@ describe('desktop main startup', () => {
     expect(window.listenerCount('leave-full-screen')).toBe(baseline.leave)
   })
 
-  it('waits for Platform storage cleanup before the installer takes over', async () => {
-    const host = await readyForUpdate()
-    harness.dialog.showMessageBox.mockResolvedValueOnce({ response: 0 })
-    const cleanup = harness.deferPlatformClose()
-    const preparing = harness.prepareUpdate()
-    await vi.waitFor(() => { expect(harness.platformCloseAndWait).toHaveBeenCalledOnce() })
-    expect(host.updateTasks).toHaveBeenLastCalledWith('lock')
-    expect(host.stop).not.toHaveBeenCalled()
-    cleanup.resolve()
-    await host.stopping.promise
-    expect(host.stop).toHaveBeenCalledWith(true)
-    host.exited.resolve()
-    await expect(preparing).resolves.toBe(true)
-  })
-
   it.each(['accepted', 'failed'] as const)('settles analytics intake before locking API admission and continues after intake failure: %s', async (outcome) => {
     const host = await readyForUpdate()
     await vi.waitFor(() => { expect(harness.analytics).toHaveBeenCalledWith(expect.objectContaining({ eventName: 'desktop_app_launch' })) })
@@ -2487,18 +2176,6 @@ describe('desktop main startup', () => {
     await host.stopping.promise
     host.exited.resolve()
     await expect(preparing).resolves.toBe(true)
-  })
-
-  it('reports a Platform storage cleanup failure as preparation failure without stopping the Host', async () => {
-    const host = await readyForUpdate()
-    harness.dialog.showMessageBox.mockResolvedValueOnce({ response: 0 })
-    const cleanup = harness.deferPlatformClose()
-    const preparing = harness.prepareUpdate()
-    await vi.waitFor(() => { expect(harness.platformCloseAndWait).toHaveBeenCalledOnce() })
-    cleanup.reject(new Error('platform storage cleanup failed'))
-    await expect(preparing).rejects.toThrow('platform storage cleanup failed')
-    expect(host.updateTasks.mock.calls).toEqual([['inspect'], ['lock'], ['unlock']])
-    expect(host.stop).not.toHaveBeenCalled()
   })
 
   async function answerMandatory(action: 'install' | 'later', modal = harness.windows[0]!) {
@@ -2536,20 +2213,15 @@ describe('desktop main startup', () => {
     host.exited.resolve()
     await expect(preparing).resolves.toBe(true)
     harness.closeWindowsOnQuit = true
-    const disposal = harness.deferPlatformDispose()
     harness.app.quit()
     await harness.quitCompleted.promise
     expect(modal.isDestroyed()).toBe(true)
     expect(harness.app.quit).toHaveBeenCalledTimes(2)
-    // The installer owns the exit, so Platform cleanup starts without holding the quit open.
-    expect(harness.platformDispose).toHaveBeenCalledOnce()
     inspected.resolve({ activeTasks: true, scheduledTasks: true })
     answered.resolve({ response: 0, checkboxChecked: false })
     await vi.advanceTimersByTimeAsync(0)
     expect(harness.dialog.showMessageBox).toHaveBeenCalledTimes(pendingPhase === 'dialog' ? 1 : 0)
-    expect(harness.platformDispose).toHaveBeenCalledOnce()
     expect(harness.app.quit).toHaveBeenCalledTimes(2)
-    disposal.resolve()
   })
 
   it.each([false, true])('restores a cleanly stopped Host after installer failure and retains mandatory blocking: %s', async (mandatory) => {
@@ -2870,7 +2542,7 @@ describe('desktop main startup', () => {
     let finishPolicy!: () => void
     let failPolicy!: (error: Error) => void
     const policy = new Promise<void>((resolve, reject) => { finishPolicy = resolve; failPolicy = reject })
-    testAuth.dispose.mockImplementationOnce(() => policy)
+    fileDrag.dispose.mockImplementationOnce(() => policy)
     const failure = new Error('policy Session storage cleanup failed')
     const host = await readyForUpdate()
     let quitCompleted = false
@@ -2884,7 +2556,7 @@ describe('desktop main startup', () => {
       window.emit('session-end', { reasons: ['shutdown'] })
       harness.app.quit()
       await vi.advanceTimersByTimeAsync(0)
-      expect(testAuth.dispose).toHaveBeenCalledOnce()
+      expect(fileDrag.dispose).toHaveBeenCalledOnce()
       expect(reportSignal?.aborted).toBe(true)
       expect(quitCompleted).toBe(false)
       if (rejectCleanup) failPolicy(failure)
@@ -3094,42 +2766,6 @@ describe('desktop main startup', () => {
     expect(window.urls).toEqual(['dsh-app://app/'])
     expect(harness.windows).toHaveLength(1)
   })
-})
-
-it.each(['failed', 'expired'] as const)('focuses DSH once when browser authorization becomes %s', async (phase) => {
-  await import('../src/main.ts')
-  await harness.preparing.promise
-  harness.prepared.resolve()
-  await harness.hostStarted.promise
-  harness.hosts[0]!.ready.resolve()
-  await Promise.resolve(invoke(DESKTOP_IPC.boot))
-  const window = harness.windows[0]!
-  window.focus.mockClear()
-  const state: AccountView = {
-    status: 'signed-out', links: { usageUrl: 'https://platform.deepseek.com/usage', topUpUrl: 'https://platform.deepseek.com/top_up' },
-    attempt: { id: 'test-failed-attempt' as NonNullable<AccountView['attempt']>['id'], phase },
-  }
-  harness.publishAccount(state)
-  harness.publishAccount(state)
-  expect(window.focus).toHaveBeenCalledTimes(1)
-})
-
-it.each([['light', false], ['dark', true]] as const)('opens Platform authorization in the effective %s palette', async (theme, shouldUseDarkColors) => {
-  await import('../src/main.ts')
-  await harness.preparing.promise
-  harness.prepared.resolve()
-  await harness.hostStarted.promise
-  harness.hosts[0]!.ready.resolve()
-  await Promise.resolve(invoke(DESKTOP_IPC.boot))
-  harness.nativeTheme.shouldUseDarkColors = shouldUseDarkColors
-  const state: AccountView = {
-    status: 'signed-out', links: { usageUrl: 'https://platform.deepseek.com/usage', topUpUrl: 'https://platform.deepseek.com/top_up' },
-    attempt: { id: 'test-theme-attempt' as NonNullable<AccountView['attempt']>['id'], phase: 'waiting-browser',
-      authorizeUrl: 'https://platform.deepseek.com/dsh/authorize?state=state-1' },
-  }
-  harness.publishAccount(state)
-  harness.publishAccount(state)
-  expect(harness.openExternal).toHaveBeenCalledExactlyOnceWith(`https://platform.deepseek.com/dsh/authorize?state=state-1&theme=${theme}`)
 })
 
 it('disables native product events for a disabled Desktop launch', async () => {

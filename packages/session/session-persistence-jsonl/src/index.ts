@@ -27,7 +27,7 @@ import {
   assertStoredId, materializeCreateHeader, sessionFormatVersionRefusal, validateStoredEvents,
   type SessionAccess, type SessionHandle,
   type SessionHandleReadResult,
-  type SessionLocation, type SessionPersistenceCreateOptions,
+  type SessionLocation, type SessionPersistenceCreateOptions, type SessionPersistenceDeleteOptions,
   type SessionPersistenceListOptions, type SessionPersistenceOpenOptions,
   type SessionPersistenceSnapshot, type SessionPersistenceStatOptions,
   type SessionPersistenceRevision as PersistenceRevision,
@@ -584,6 +584,55 @@ class JsonlSessionPersistence extends SessionPersistence {
     }
     signal?.throwIfAborted()
     return snapshots
+  }
+
+  /**
+   * Delete one stored session and all of its artifacts permanently.
+   * If an active write handle exists in this process, it is closed first.
+   * @param id - the stored session to delete.
+   * @param options - optional cancellation.
+   * @throws {SessionPersistenceNotFoundError} when the session does not exist.
+   */
+  async delete(id: SessionId, options?: SessionPersistenceDeleteOptions): Promise<void> {
+    options?.signal?.throwIfAborted()
+    await this.ensureRootEncoding()
+    options?.signal?.throwIfAborted()
+
+    const hadPending = this.tracker.hasPending(id)
+    // Close any open handles in this process for this session.
+    for (const handle of [...this.tracker.openHandles]) {
+      if (handle.id === id) {
+        await handle.close()
+      }
+    }
+
+    const encoded = encodeSegment(id)
+    let foundDir = false
+
+    const projectDirs = await this.listProjectDirs(options?.signal)
+    for (const project of projectDirs) {
+      options?.signal?.throwIfAborted()
+      const dir = join(project, encoded)
+      try {
+        const stats = await stat(dir)
+        if (stats.isDirectory()) {
+          foundDir = true
+          await rm(dir, { recursive: true, force: true })
+          for (const key of [...this.listedHeaders.keys()]) {
+            if (key.startsWith(dir)) this.listedHeaders.delete(key)
+          }
+        }
+      } catch (error) {
+        if (!isENOENT(error)) throw error
+      }
+    }
+
+    this.coldLogMemo.delete(id)
+    this.migrationPreparations.delete(id)
+
+    if (!hadPending && !foundDir) {
+      throw new SessionPersistenceNotFoundError(id)
+    }
   }
 
   // --- handle-facing storage internals (package-private via the handle class below) ---

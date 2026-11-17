@@ -111,6 +111,11 @@ export interface ISessions {
    */
   refresh(): Promise<void>
   /**
+   * Apply one Session removal to local client list and snapshot state.
+   * @param sessionId - removed Session identity.
+   */
+  handleSessionRemoved(sessionId: SessionId): void
+  /**
    * Search the Host's visible message-content index. Results stay
    * request-local; the list snapshot remains the metadata authority.
    * @param query - non-blank literal phrase.
